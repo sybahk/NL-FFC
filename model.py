@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.fft as fft
+from einops import rearrange
 from torchinfo import summary
 
 
@@ -13,14 +14,13 @@ class NonLocalAttention(nn.Module):
     def forward(self, feat) -> torch.Tensor:
         b, c, h, w = feat.shape
         out_feat = self.conv(feat)
-        out_feat = torch.reshape(out_feat, (b, h * w, 1))
+        out_feat = rearrange(out_feat, 'b c h w -> b (h w) c')
         out_feat = torch.unsqueeze(out_feat, -1)
         out_feat = self.softmax(out_feat)
         out_feat = torch.squeeze(out_feat, -1)
-        out_feat = torch.reshape(out_feat, (b, h * w, 1))
-        identity = torch.reshape(feat, (b, c, h * w))
+        identity = rearrange(feat, 'b c h w -> b c (h w)')
         out_feat = torch.matmul(identity, out_feat)
-        out_feat = torch.reshape(out_feat, (b, c, 1, 1))
+        out_feat = torch.unsqueeze(out_feat, -1)
         return out_feat
 
 
@@ -38,10 +38,9 @@ class NonLocalAttentionBlock(nn.Module):
         )
 
     def forward(self, feat):
-        identity = feat
         out_feat = self.nonlocal_attention(feat)
         out_feat = self.global_transform(out_feat)
-        return identity + out_feat
+        return feat + out_feat
 
 
 class SpectralTransformer(nn.Module):
@@ -52,13 +51,13 @@ class SpectralTransformer(nn.Module):
 
     def forward(self, feat: torch.Tensor) -> torch.Tensor:
         b, c, h, w = feat.shape
-        out_feat = fft.rfft2(feat, [h * 2, w * 2])
+        out_feat = fft.rfft2(feat)
         out_feat = torch.cat([out_feat.real, out_feat.imag], dim=1)
         out_feat = self.conv(out_feat)
         out_feat = self.lrelu(out_feat)
         c = out_feat.shape[1]
-        out_feat = out_feat[:, : c // 2] + out_feat[:, c // 2 :]
-        out_feat = fft.irfft2(out_feat, [h, w])
+        out_feat = torch.complex(out_feat[:, : c // 2], out_feat[:, c // 2 :])
+        out_feat = fft.irfft2(out_feat)
         return out_feat
 
 
@@ -89,34 +88,34 @@ class FourierConvolutionBlock(nn.Module):
 
 
 class NonLocalFFC(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, hidden_dim = 64) -> None:
         super().__init__()
         self.first_block = nn.Sequential(
-            nn.Conv2d(3, 64, 1),
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),            
+            nn.Conv2d(3, hidden_dim, 1),
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),            
         )
         self.second_block = nn.Sequential(
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),              
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),              
         )
         self.third_block = nn.Sequential(
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 64, 1),                          
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),                          
         )
         self.fourth_block = nn.Sequential(
-            FourierConvolutionBlock(64),
-            nn.Conv2d(64, 3, 3, 1, 1)            
+            FourierConvolutionBlock(hidden_dim),
+            nn.Conv2d(hidden_dim, 3, 3, 1, 1)            
         )
     def forward(self, feat):
         first_feat = self.first_block(feat)
@@ -126,6 +125,6 @@ class NonLocalFFC(nn.Module):
 
 
 if __name__ == "__main__":
-    nonlocal_attention = NonLocalFFC()
-    feat = torch.randn(4, 3, 512, 512)
+    nonlocal_attention = NonLocalFFC(64)
+    feat = torch.randn(8, 3, 256, 256)
     summary(nonlocal_attention, input_data=feat)
